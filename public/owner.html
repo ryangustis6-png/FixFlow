@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>FixFlow — owner</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <div class="top"><div class="logo">F</div><div><h1>FixFlow</h1><div class="sub">Owner inbox</div></div><div class="right" id="prop"></div></div>
+  <div class="tabs"><button id="tInbox" class="on">Requests</button><button id="tLedger">Expenses</button></div>
+  <div id="view"></div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const el = (t, cls, text) => { const e = document.createElement(t); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const money = c => '$' + (c / 100).toLocaleString('en-US', {minimumFractionDigits: c % 100 ? 2 : 0, maximumFractionDigits: 2});
+const ago = iso => { const s = (Date.now() - Date.parse(iso)) / 1000; return s < 60 ? 'just now' : s < 3600 ? Math.floor(s / 60) + ' min ago' : s < 86400 ? Math.floor(s / 3600) + ' h ago' : new Date(iso).toLocaleDateString(); };
+const ICON = {Appliance: '🧺', Plumbing: '🚰', HVAC: '🌡️', Electrical: '⚡', 'Pest control': '🐜', Locksmith: '🔑', 'Gas / HVAC': '🔥', General: '🛠️'};
+const STATUS = {awaiting_owner: 'Needs approval', dispatched: 'Dispatched', declined: 'Declined'};
+const cap = s => s[0].toUpperCase() + s.slice(1);
+let tab = 'inbox', openId = null, known = null;
+
+$('tInbox').onclick = () => { tab = 'inbox'; openId = null; render(); };
+$('tLedger').onclick = () => { tab = 'ledger'; render(); };
+
+function toast(text, onclick) { const t = el('div', 'toast', text); t.onclick = () => { t.remove(); onclick?.(); }; document.body.append(t); setTimeout(() => t.remove(), 6000); navigator.vibrate?.(200); }
+
+async function render() {
+  $('tInbox').classList.toggle('on', tab === 'inbox'); $('tLedger').classList.toggle('on', tab === 'ledger');
+  if (tab === 'ledger') return renderLedger();
+  if (openId) return renderDetail(openId);
+  const data = await fetch('api/requests').then(r => r.json());
+  $('prop').textContent = data.property.name;
+  const pending = data.requests.filter(r => r.status === 'awaiting_owner').length;
+  document.title = (pending ? `(${pending}) ` : '') + 'FixFlow — owner';
+  if (!data.requests.length) return $('view').replaceChildren(el('div', 'card muted', 'No requests yet. When a tenant reports an issue, it shows up here with repair options ready to approve.'));
+  $('view').replaceChildren(...data.requests.map(r => {
+    const c = el('div', 'card inbox-item');
+    const th = el('div', 'thumb', ICON[r.plan.trade] || '🛠️');
+    const m = el('div', 'meta');
+    const rec = r.plan.options.find(o => o.id === (r.decision?.option_id || r.plan.recommended_id));
+    m.append(el('div', 't', r.plan.issue_label), el('div', 'muted', `${r.tenant_name} · ${ago(r.created_at)} · ${r.decision ? 'Chosen' : 'Best'}: ${rec.cost_label}`));
+    const right = el('div'); right.style.cssText = 'display:flex;flex-direction:column;gap:4px;align-items:flex-end';
+    right.append(el('span', 'pill s-' + r.status, STATUS[r.status]), el('span', 'pill u-' + r.plan.urgency, cap(r.plan.urgency)));
+    c.append(th, m, right); c.onclick = () => { openId = r.id; render(); };
+    return c;
+  }));
+}
+
+function optionCard(r, o) {
+  const c = el('div', 'opt' + (o.recommended ? ' rec' : '') + (o.blocked ? ' blocked' : ''));
+  if (o.recommended) c.append(el('span', 'badge-rec', 'RECOMMENDED'));
+  const top = el('div'); top.style.cssText = 'display:flex;justify-content:space-between;align-items:baseline;gap:8px';
+  top.append(el('div', 'price', o.cost_label), el('div', 'muted', o.eta_label));
+  c.append(top, el('div', 'title', o.title));
+  const dl = el('dl');
+  [['Who', o.vendor + (o.vendor_rating ? ` · ★ ${o.vendor_rating}` : '')], ['Tenant', o.tenant_effort],
+   ['Warranty', o.warranty_days ? (o.warranty_days >= 365 ? Math.round(o.warranty_days / 365) + ' yr' : o.warranty_days + ' days') : 'None'],
+   ['Books as', o.tax_label]].forEach(([k, v]) => dl.append(el('dt', null, k), el('dd', null, v)));
+  c.append(dl);
+  if (o.blocked) c.append(el('div', 'err', o.blocked_reason));
+  else if (r.status === 'awaiting_owner') {
+    const b = el('button', 'btn' + (o.recommended ? '' : ' secondary'), `Approve · up to ${money(o.cost_high_cents)}`);
+    b.onclick = () => act(r.id, {action: 'approve', option_id: o.id}, b); c.append(b);
+  } else if (r.decision?.option_id === o.id) c.append(el('div', 'pill s-dispatched', '✓ Approved'));
+  return c;
+}
+
+async function renderDetail(id) {
+  const r = await fetch('api/request?id=' + encodeURIComponent(id)).then(x => x.json());
+  const back = el('button', 'back', '← All requests'); back.onclick = () => { openId = null; render(); };
+  const head = el('div', 'card');
+  const pills = el('div'); pills.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px';
+  pills.append(el('span', 'pill s-' + r.status, STATUS[r.status]), el('span', 'pill u-' + r.plan.urgency, cap(r.plan.urgency)), el('span', 'muted', `${r.tenant_name} · ${ago(r.created_at)}`));
+  head.append(pills, el('h2', null, r.plan.issue_label));
+  if (r.photo) { const img = new Image(); img.src = r.photo; img.alt = 'Tenant photo'; img.style.cssText = 'width:100%;max-height:300px;object-fit:cover;border-radius:12px;margin:6px 0'; head.append(img); }
+  if (r.text) head.append(el('div', 'msg', `“${r.text}”`));
+  head.append(el('h3', null, r.triage.method === 'ai' ? 'AI assessment' : 'Assessment (keyword fallback)'), el('p', 'small', r.triage.summary));
+  if (r.triage.likely_cause) head.append(el('p', 'small', 'Likely cause: ' + r.triage.likely_cause));
+  if (r.triage.photo_observations) head.append(el('p', 'small muted', 'In the photo: ' + r.triage.photo_observations));
+  const opts = el('div', 'card');
+  opts.append(el('h2', null, r.status === 'awaiting_owner' ? 'Pick a fix' : 'Options'), el('p', 'muted', r.plan.recommendation_reason + (r.plan.savings_vs_most_expensive_cents ? ` Saves up to ${money(r.plan.savings_vs_most_expensive_cents)} vs. the priciest option.` : '')));
+  r.plan.options.forEach(o => opts.append(optionCard(r, o)));
+  if (r.status === 'awaiting_owner') { const d = el('button', 'btn danger', 'Decline — I\'ll handle it myself'); d.onclick = () => act(r.id, {action: 'decline'}, d); opts.append(d); }
+  const parts = [back, head];
+  if (r.work_order) {
+    const w = el('div', 'card'); const h = el('h2', null, `Work order ${r.work_order.id}`); h.append(el('span', 'sim', 'SIMULATED DISPATCH'));
+    w.append(h, el('p', 'small', `${r.work_order.vendor}${r.work_order.scheduled ? ' · ' + r.work_order.scheduled : ''} · not to exceed ${money(r.work_order.not_to_exceed_cents)}`),
+      el('h3', null, 'Sent to vendor'), el('div', 'msg', r.work_order.vendor_message), el('h3', null, 'Sent to tenant'), el('div', 'msg', r.work_order.tenant_message),
+      el('p', 'muted', `Logged to expenses as ${r.work_order.tax_label}: ${r.work_order.tax_line}.`));
+    parts.push(w);
+  }
+  parts.push(opts);
+  const tl = el('div', 'card'); tl.append(el('h2', null, 'Activity'));
+  const ul = el('ul', 'timeline'); r.timeline.forEach(t => { const li = el('li'); li.append(el('b', null, t.who), ` — ${t.what} `, el('span', 'muted', ago(t.at))); ul.append(li); });
+  tl.append(ul); parts.push(tl);
+  $('view').replaceChildren(...parts);
+}
+
+async function act(id, body, btn) {
+  btn.disabled = true; const label = btn.textContent; btn.textContent = 'Working…';
+  const r = await fetch('api/decide', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id, ...body})});
+  const data = await r.json();
+  if (!r.ok) { btn.disabled = false; btn.textContent = label; return toast(data.error); }
+  toast(body.action === 'approve' ? '✓ Approved — vendor and tenant notified' : 'Declined — tenant notified'); render();
+}
+
+async function renderLedger() {
+  const L = await fetch('api/ledger').then(r => r.json());
+  const k = el('div', 'card'); const g = el('div', 'kpis');
+  [[money(L.totals.est_cost_cents), 'Approved spend (est.)'], [L.totals.jobs, 'Jobs approved'], [money(L.totals.repairs_cents), 'Repairs — expense now'], [money(L.totals.improvements_cents), 'Improvements — capitalize']]
+    .forEach(([v, l]) => { const d = el('div', 'kpi'); d.append(el('div', 'v', v), el('div', 'l', l)); g.append(d); });
+  k.append(el('h2', null, 'Maintenance expenses'), g);
+  const t = el('div', 'card'); const tbl = el('table');
+  const hr = el('tr'); ['Date', 'Issue', 'Vendor', 'Books as', 'Est.'].forEach((h, i) => hr.append(el('th', i === 4 ? 'num' : null, h)));
+  tbl.append(hr);
+  L.rows.forEach(r => { const tr = el('tr'); [r.date, r.issue, r.vendor.replace(' (sample)', ''), r.tax_label, money(r.est_cost_cents)].forEach((v, i) => tr.append(el('td', i === 4 ? 'num' : null, v))); tbl.append(tr); });
+  if (!L.rows.length) t.append(el('p', 'muted', 'No approved jobs yet.')); else t.append(tbl);
+  t.append(el('p', 'muted', L.note));
+  $('view').replaceChildren(k, t);
+}
+
+// Live updates: poll every 3s and alert on new requests.
+async function tick() {
+  const data = await fetch('api/requests').then(r => r.json()).catch(() => null); if (!data) return;
+  const ids = new Set(data.requests.map(r => r.id));
+  if (known) { const fresh = data.requests.find(r => !known.has(r.id)); if (fresh) toast(`🔔 New: ${fresh.plan.issue_label} — tap to review`, () => { tab = 'inbox'; openId = fresh.id; render(); }); }
+  known = ids; if (tab === 'inbox' && !openId) render();
+}
+render(); tick(); setInterval(tick, 3000);
+</script>
+</body>
+</html>

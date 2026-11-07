@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>FixFlow — report a maintenance issue</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <div class="top"><div class="logo">F</div><div><h1>FixFlow</h1><div class="sub" id="prop">412 Maple St, Unit B</div></div></div>
+
+  <form class="card" id="form">
+    <h2>What's wrong?</h2>
+    <p class="muted" style="margin:0">Snap a photo and tell us in your own words. Your owner gets options to approve right away.</p>
+    <label>Photo</label>
+    <div class="photo-drop" id="drop">📷 Tap to take or choose a photo</div>
+    <input type="file" id="file" accept="image/*" capture="environment" hidden>
+    <label for="text">Describe the problem</label>
+    <textarea id="text" placeholder="e.g. The dryer runs but there's no heat, clothes are still wet after an hour"></textarea>
+    <div class="row" style="margin-top:8px"><button type="button" class="btn secondary mic" id="mic">🎙️ Speak instead</button></div>
+    <label for="name">Your name</label>
+    <input type="text" id="name" placeholder="First and last name" autocomplete="name">
+    <p class="err" id="err" hidden></p>
+    <button class="btn" id="send" style="margin-top:14px">Send to owner</button>
+  </form>
+
+  <div id="status" hidden></div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const el = (t, cls, text) => { const e = document.createElement(t); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+let image = null, mode = 'text';
+
+// Photo: downscale on device to keep uploads fast (max 1280px JPEG).
+$('drop').onclick = () => $('file').click();
+$('file').onchange = async () => {
+  const f = $('file').files[0]; if (!f) return;
+  const img = await createImageBitmap(f).catch(() => null);
+  if (!img) { showErr('Could not read that photo — try another.'); return; }
+  const scale = Math.min(1, 1280 / Math.max(img.width, img.height));
+  const c = Object.assign(document.createElement('canvas'), {width: Math.round(img.width * scale), height: Math.round(img.height * scale)});
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  const url = c.toDataURL('image/jpeg', 0.82);
+  image = {media_type: 'image/jpeg', data: url.split(',')[1]};
+  const p = new Image(); p.src = url; p.alt = 'Selected photo'; $('drop').replaceChildren(p);
+  if (mode === 'text') mode = 'photo';
+};
+
+// Voice: browser speech-to-text where supported.
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null;
+if (!SR) { $('mic').textContent = '🎙️ Use your keyboard\'s mic to dictate'; $('mic').disabled = true; }
+$('mic').onclick = () => {
+  if (rec) { rec.stop(); return; }
+  rec = new SR(); rec.lang = 'en-US'; rec.interimResults = true; rec.continuous = true;
+  const start = $('text').value ? $('text').value + ' ' : '';
+  rec.onresult = e => { $('text').value = start + [...e.results].map(r => r[0].transcript).join(''); };
+  rec.onend = () => { rec = null; $('mic').classList.remove('on'); $('mic').textContent = '🎙️ Speak instead'; };
+  rec.start(); mode = 'voice'; $('mic').classList.add('on'); $('mic').textContent = '⏹ Stop recording';
+};
+
+function showErr(m) { $('err').textContent = m; $('err').hidden = !m; }
+
+$('form').onsubmit = async e => {
+  e.preventDefault(); showErr('');
+  const text = $('text').value.trim();
+  if (!text && !image) return showErr('Add a photo or describe the problem.');
+  $('send').disabled = true; $('send').textContent = 'Analyzing your issue…';
+  try {
+    const r = await fetch('api/requests', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text, image, tenant_name: $('name').value, input_mode: mode})});
+    const data = await r.json(); if (!r.ok) throw Error(data.error || 'Something went wrong');
+    history.replaceState(null, '', '?id=' + data.id);
+    $('form').hidden = true; renderStatus(data); poll(data.id);
+  } catch (err) { showErr(err.message); }
+  finally { $('send').disabled = false; $('send').textContent = 'Send to owner'; }
+};
+
+const STATUS = {awaiting_owner: 'Waiting for owner approval', dispatched: 'Fix approved', declined: 'Owner will follow up'};
+function renderStatus(r) {
+  const s = $('status'); s.hidden = false;
+  const card = el('div', 'card');
+  const head = el('div'); head.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap';
+  head.append(el('span', 'pill s-' + r.status, STATUS[r.status] || r.status), el('span', 'pill u-' + r.plan.urgency, r.plan.urgency[0].toUpperCase() + r.plan.urgency.slice(1)));
+  card.append(head, el('h2', null, r.plan.issue_label));
+  card.firstChild.style.marginBottom = '8px';
+  card.append(el('p', 'small', r.triage.summary));
+  if (r.triage.tenant_safety_steps?.length) {
+    card.append(el('h3', null, 'Do this now'));
+    const ul = el('ul', 'steps'); r.triage.tenant_safety_steps.forEach(t => ul.append(el('li', null, t))); card.append(ul);
+  }
+  if (r.status === 'awaiting_owner') card.append(el('p', 'muted', 'Your owner has been sent repair options. This page updates automatically.'));
+  if (r.work_order) { card.append(el('h3', null, 'Message from FixFlow')); card.append(el('div', 'msg', r.work_order.tenant_message));
+    if (r.work_order.part_link) { const a = el('a', null, 'See the part'); a.href = r.work_order.part_link; a.target = '_blank'; a.rel = 'noopener'; card.append(a); } }
+  if (r.status === 'declined') card.append(el('div', 'msg', 'Your owner reviewed this and will contact you directly.' + (r.decision?.note ? ' Note: ' + r.decision.note : '')));
+  const again = el('button', 'btn ghost', 'Report another issue'); again.style.marginTop = '12px';
+  again.onclick = () => { location.href = location.pathname; };
+  card.append(again);
+  s.replaceChildren(card);
+}
+let timer;
+function poll(id) { clearInterval(timer); timer = setInterval(async () => {
+  const r = await fetch('api/request?id=' + encodeURIComponent(id)).then(x => x.ok ? x.json() : null).catch(() => null);
+  if (r) { renderStatus(r); if (r.status !== 'awaiting_owner') clearInterval(timer); } }, 3000); }
+const existing = new URLSearchParams(location.search).get('id');
+if (existing) fetch('api/request?id=' + encodeURIComponent(existing)).then(r => r.ok ? r.json() : null).then(r => { if (r) { $('form').hidden = true; renderStatus(r); if (r.status === 'awaiting_owner') poll(r.id); } });
+</script>
+</body>
+</html>
