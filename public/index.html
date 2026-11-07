@@ -75,7 +75,7 @@ function setupMic(eleven) {
         try {
           const data = await new Promise(res => { const fr = new FileReader(); fr.onload = () => res(fr.result.split(',')[1]); fr.readAsDataURL(blob); });
           const r = await fetch('api/transcribe', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({data, mime: blob.type})});
-          const out = await r.json(); if (!r.ok) throw Error(out.error);
+          const out = await r.json(); if (!r.ok) throw Error(out.error); if (!out.text) throw Error('empty');
           $('text').value = ($('text').value ? $('text').value + ' ' : '') + out.text; mode = 'voice';
           $('micHint').textContent = 'Got it — edit the text below if anything is off.';
         } catch (e) { showErr('Could not transcribe that — please type it instead.'); }
