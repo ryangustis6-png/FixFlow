@@ -2,9 +2,12 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {buildOptions, fmt} from '../lib/options.js';
 import {triage, keywordTriage} from '../lib/triage.js';
-import {createRequest, decide, ledger} from '../lib/workflow.js';
+import {createRequest, decide, ledger, complete, tenantConfirm, tenantView, metrics, listProperties, saveProperty} from '../lib/workflow.js';
+import {parseCommand, requestBriefing, portfolioBriefing} from '../lib/voice.js';
+import {handle} from '../lib/api.js';
 
-const memStore = () => { const m = new Map(); return {kind: 'mem', list: async () => [...m.values()], get: async id => m.get(id) || null, put: async r => (m.set(r.id, structuredClone(r)), r)}; };
+const coll = () => { const m = new Map(); return {list: async () => [...m.values()].sort((a, b) => b.created_at.localeCompare(a.created_at)), get: async id => structuredClone(m.get(id)) || null, put: async r => (m.set(r.id, structuredClone(r)), r), clear: async () => m.clear()}; };
+const memStore = () => ({kind: 'mem', requests: coll(), properties: coll()});
 const ai = (over = {}) => async () => ({issue_type: 'dryer', urgency: 'routine', summary: 'Dryer tumbles but no heat.', likely_cause: 'Blown thermal fuse.',
   tenant_safety_steps: ['Unplug the dryer.'], diy_safe: true, confidence: 'high', method: 'ai', ...over});
 
@@ -46,11 +49,11 @@ test('lifecycle: report -> owner approves -> work order + ledger; double-approve
   await decide(store, second.id, {action: 'approve', option_id: 'opt-3'});  // replacement = improvement
   const declined = await createRequest(store, {text: 'squeaky door'}, {triageFn: ai({issue_type: 'other'})});
   await decide(store, declined.id, {action: 'decline', note: 'Will handle at next visit'});
-  const L = ledger(await store.list());
+  const L = ledger(await store.requests.list());
   assert.equal(L.totals.jobs, 2);
   assert.equal(L.totals.repairs_cents, 17500);
   assert.equal(L.totals.improvements_cents, 115000);
-  assert.equal(L.totals.est_cost_cents, L.totals.repairs_cents + L.totals.improvements_cents);
+  assert.equal(L.totals.cost_cents, L.totals.repairs_cents + L.totals.improvements_cents);
 });
 
 test('AI triage uses forced tool output; falls back to keywords on failure or bad output', async () => {
@@ -65,4 +68,66 @@ test('AI triage uses forced tool output; falls back to keywords on failure or ba
   assert.equal(weird.issue_type, 'toilet');
   assert.equal(keywordTriage('I smell gas in the kitchen').urgency, 'emergency');
   assert.equal(keywordTriage('I smell gas in the kitchen').diy_safe, false);
+});
+
+test('properties: demo seeded, add property with auto-approve limit, requests attach to the right property', async () => {
+  const store = memStore();
+  assert.equal((await listProperties(store))[0].id, 'demo');
+  const p = await saveProperty(store, {name: '9 Oak Ave', unit: 'Apt 2', tenant_name: 'Sam Ortiz', monthly_rent: '1,250', auto_approve_limit: '50'});
+  assert.equal(p.monthly_rent_cents, 125000); assert.equal(p.auto_approve_limit_cents, 5000);
+  await assert.rejects(saveProperty(store, {name: ''}), /address is required/);
+  await assert.rejects(saveProperty(store, {name: 'x', monthly_rent: 'abc'}), /Enter an amount/);
+  const auto = await createRequest(store, {property_id: p.id, text: 'dryer no heat'}, {triageFn: ai()});
+  assert.equal(auto.status, 'dispatched');                             // $25–$45 part under $50 limit
+  assert.equal(auto.decision.by, 'Auto-approve rule');
+  assert.equal(auto.tenant_name, 'Sam Ortiz');
+  const manual = await createRequest(store, {property_id: 'demo', text: 'dryer no heat'}, {triageFn: ai()});
+  assert.equal(manual.status, 'awaiting_owner');                       // demo property has no limit
+});
+
+test('completion with actual cost, tenant confirmation, metrics and tenant privacy', async () => {
+  const store = memStore();
+  const r = await createRequest(store, {text: 'dryer no heat', tenant_name: 'Jamie Lee'}, {triageFn: ai()});
+  await assert.rejects(complete(store, r.id, {actual_cost: '100'}), /Only dispatched/);
+  await decide(store, r.id, {action: 'approve', option_id: 'opt-2', via: 'voice'});
+  const done = await complete(store, r.id, {actual_cost: '$235.50'});
+  assert.equal(done.completion.actual_cost_cents, 23550);
+  assert.equal(done.completion.over_limit_cents, 2550);                // limit was $210
+  assert.equal(done.decision.by, 'Owner (voice)');
+  const conf = await tenantConfirm(store, r.id, {fixed: false, note: 'still cold'});
+  assert.equal(conf.tenant_confirmation.fixed, false);
+  const tv = tenantView(conf);
+  assert.equal(tv.plan, undefined); assert.equal(tv.work_order, undefined);
+  assert.ok(!JSON.stringify(tv).includes('not-to-exceed'));
+  const all = await store.requests.list(), props = await listProperties(store);
+  const m = metrics(all, props);
+  assert.equal(m.completed, 1); assert.equal(m.not_fixed_flags, 1); assert.equal(m.spend_month_cents, 23550);
+  assert.equal(ledger(all).rows[0].basis, 'actual');
+  assert.match(portfolioBriefing(all, m), /still not fixed/);
+});
+
+test('voice: briefing text and spoken command parsing', async () => {
+  const store = memStore();
+  const r = await createRequest(store, {text: 'dryer no heat', tenant_name: 'Jamie Lee'}, {triageFn: ai()});
+  const b = requestBriefing(r);
+  assert.match(b, /Jamie reports/); assert.match(b, /I recommend option one, \$25 to \$45/);
+  assert.equal(parseCommand('Approve option two', r).option_id, 'opt-2');
+  assert.equal(parseCommand('yeah go with option 3 please', r).option_id, 'opt-3');
+  assert.equal(parseCommand('approve the recommended one', r).option_id, 'opt-1');
+  assert.equal(parseCommand('book the handyman', r).option_id, 'opt-2');
+  assert.equal(parseCommand('decline, I will handle it', r).action, 'decline');
+  assert.equal(parseCommand('what is the weather', r), null);
+});
+
+test('API: owner routes need the PIN when set; tenant routes do not expose pricing', async () => {
+  const store = memStore();
+  process.env.OWNER_PIN = '2468';
+  try {
+    const [s1] = await handle('dashboard', 'GET', {}, store); assert.equal(s1, 401);
+    const [s2] = await handle('dashboard', 'GET', {headers: {'x-owner-pin': '2468'}}, store); assert.equal(s2, 200);
+    const [s3, rep] = await handle('report', 'POST', {body: {text: 'my dryer has no heat'}}, store); assert.equal(s3, 201);
+    assert.equal(rep.plan, undefined);
+    const [s4] = await handle('decide', 'POST', {body: {id: rep.id, action: 'approve', option_id: 'opt-1'}}, store); assert.equal(s4, 401);
+    const [s5] = await handle('reset', 'POST', {headers: {'x-owner-pin': '2468'}, body: {}}, store); assert.equal(s5, 400);
+  } finally { delete process.env.OWNER_PIN; }
 });

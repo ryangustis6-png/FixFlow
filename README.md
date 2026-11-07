@@ -11,19 +11,27 @@ Small residential investors often own rentals far from home. When a dryer dies o
 4. **Owner approves** one option (or declines). Optional auto-approve limit for small, non-emergency fixes.
 5. **Execution:** work order with a not-to-exceed amount, vendor request and tenant update messages, and an **expense ledger** tagged repair (Schedule E line 14) vs. likely capital improvement.
 
+## Owner dashboard
+Overview (what needs approval, spend this month, savings, time to decision, maintenance as % of rent), Requests (open and past, by property), Properties (add/edit, per-property tenant link, auto-approve limit), Expenses (estimate vs. actual invoice, repair vs. improvement, CSV export). Protected by an owner PIN.
+
+## Voice (ElevenLabs)
+- Tenants report by talking: audio is transcribed with ElevenLabs Scribe v2.
+- Owners hear a spoken briefing (ElevenLabs Flash v2.5) for the whole portfolio or one request, and can approve by saying "approve option two". The app shows what it heard and asks for confirmation before acting.
+
 ## Run locally
 ```bash
 node server.js          # http://localhost:4300 (tenant)  /owner.html (owner)
 npm test
 ```
-Optional env (server-side only): `ANTHROPIC_API_KEY`, `TRIAGE_MODEL`, `SUPABASE_URL`, `SUPABASE_KEY`, `AUTO_APPROVE_LIMIT_CENTS`.
+Env (server-side only): `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_KEY`, `ELEVENLABS_API_KEY`, `OWNER_PIN`; optional `TRIAGE_MODEL`, `ELEVENLABS_VOICE_ID`.
+Database: run `supabase/setup.sql` once in the Supabase SQL editor.
 Without an API key, triage falls back to a keyword classifier. Without Supabase, data is stored in a local file.
 
 ## Honest limitations
 - Vendors and prices are a **sample catalog** with fictional names; prices are illustrative, not quotes.
 - Dispatch, part orders and messages are **simulated** and labeled as such in the app.
 - Tax treatment is a suggestion, not tax advice.
-- No authentication in this prototype; the demo database uses permissive access.
+- Owner access is a single shared PIN, not full accounts; the demo database policies are permissive and only the server holds the key.
 
 ## Team
 Ryan, Cole, Gabe, Michael. Built with Claude.

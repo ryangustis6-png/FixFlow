@@ -8,21 +8,23 @@
 </head>
 <body>
 <div class="wrap">
-  <div class="top"><div class="logo">F</div><div><h1>FixFlow</h1><div class="sub" id="prop">412 Maple St, Unit B</div></div></div>
+  <div class="top"><div class="logo">F</div><div><h1>FixFlow</h1><div class="sub" id="prop">Loading…</div></div></div>
 
   <form class="card" id="form">
     <h2>What's wrong?</h2>
-    <p class="muted" style="margin:0">Snap a photo and tell us in your own words. Your owner gets options to approve right away.</p>
+    <p class="muted" style="margin:0">Snap a photo and tell us in your own words. Your owner gets repair options to approve right away.</p>
     <label>Photo</label>
     <div class="photo-drop" id="drop">📷 Tap to take or choose a photo</div>
     <input type="file" id="file" accept="image/*" capture="environment" hidden>
     <label for="text">Describe the problem</label>
-    <textarea id="text" placeholder="e.g. The dryer runs but there's no heat, clothes are still wet after an hour"></textarea>
-    <div class="row" style="margin-top:8px"><button type="button" class="btn secondary mic" id="mic">🎙️ Speak instead</button></div>
+    <button type="button" class="btn secondary mic" id="mic">🎙️ Tap to talk</button>
+    <p class="muted small" id="micHint" style="margin:6px 0 8px">Just say what's going on — we'll write it down for you.</p>
+    <textarea id="text" placeholder="…or type it: e.g. The dryer runs but there's no heat, clothes are still wet after an hour"></textarea>
     <label for="name">Your name</label>
     <input type="text" id="name" placeholder="First and last name" autocomplete="name">
     <p class="err" id="err" hidden></p>
     <button class="btn" id="send" style="margin-top:14px">Send to owner</button>
+    <p class="muted small" style="margin:10px 0 0">If you smell gas, see sparks or smoke, or water is flooding: leave the area and call 911 first.</p>
   </form>
 
   <div id="status" hidden></div>
@@ -30,14 +32,21 @@
 <script>
 const $ = id => document.getElementById(id);
 const el = (t, cls, text) => { const e = document.createElement(t); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
-let image = null, mode = 'text';
+const params = new URLSearchParams(location.search);
+let image = null, mode = 'text', property = null;
 
-// Photo: downscale on device to keep uploads fast (max 1280px JPEG).
+fetch('api/property' + (params.get('p') ? '?id=' + encodeURIComponent(params.get('p')) : '')).then(r => r.json()).then(p => {
+  property = p; $('prop').textContent = p.name + (p.unit ? ', ' + p.unit : '');
+  if (p.tenant_name && !$('name').value) $('name').value = p.tenant_name;
+  setupMic(p.voice);
+}).catch(() => { $('prop').textContent = ''; setupMic(false); });
+
+// ---- Photo: downscale on the phone so uploads are fast (max 1280px JPEG) ----
 $('drop').onclick = () => $('file').click();
 $('file').onchange = async () => {
   const f = $('file').files[0]; if (!f) return;
   const img = await createImageBitmap(f).catch(() => null);
-  if (!img) { showErr('Could not read that photo — try another.'); return; }
+  if (!img) return showErr('Could not read that photo — try another.');
   const scale = Math.min(1, 1280 / Math.max(img.width, img.height));
   const c = Object.assign(document.createElement('canvas'), {width: Math.round(img.width * scale), height: Math.round(img.height * scale)});
   c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
@@ -47,18 +56,43 @@ $('file').onchange = async () => {
   if (mode === 'text') mode = 'photo';
 };
 
-// Voice: browser speech-to-text where supported.
-const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-let rec = null;
-if (!SR) { $('mic').textContent = '🎙️ Use your keyboard\'s mic to dictate'; $('mic').disabled = true; }
-$('mic').onclick = () => {
-  if (rec) { rec.stop(); return; }
-  rec = new SR(); rec.lang = 'en-US'; rec.interimResults = true; rec.continuous = true;
-  const start = $('text').value ? $('text').value + ' ' : '';
-  rec.onresult = e => { $('text').value = start + [...e.results].map(r => r[0].transcript).join(''); };
-  rec.onend = () => { rec = null; $('mic').classList.remove('on'); $('mic').textContent = '🎙️ Speak instead'; };
-  rec.start(); mode = 'voice'; $('mic').classList.add('on'); $('mic').textContent = '⏹ Stop recording';
-};
+// ---- Voice: ElevenLabs transcription when configured, browser dictation otherwise ----
+function setupMic(eleven) {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const canRecord = eleven && navigator.mediaDevices?.getUserMedia && window.MediaRecorder;
+  if (!canRecord && !SR) { $('mic').hidden = true; $('micHint').textContent = 'Tip: use your keyboard\'s mic button to dictate.'; return; }
+  let rec = null, chunks = [], recog = null, timer = null;
+  $('mic').onclick = async () => {
+    if (canRecord) {
+      if (rec) { rec.stop(); return; }
+      let stream; try { stream = await navigator.mediaDevices.getUserMedia({audio: true}); } catch { return showErr('Microphone permission was denied — you can type instead.'); }
+      chunks = []; rec = new MediaRecorder(stream);
+      rec.ondataavailable = e => e.data.size && chunks.push(e.data);
+      rec.onstop = async () => {
+        clearTimeout(timer); stream.getTracks().forEach(t => t.stop());
+        const blob = new Blob(chunks, {type: rec.mimeType || 'audio/webm'}); rec = null;
+        $('mic').classList.remove('on'); $('mic').disabled = true; $('mic').textContent = '✍️ Writing it down…';
+        try {
+          const data = await new Promise(res => { const fr = new FileReader(); fr.onload = () => res(fr.result.split(',')[1]); fr.readAsDataURL(blob); });
+          const r = await fetch('api/transcribe', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({data, mime: blob.type})});
+          const out = await r.json(); if (!r.ok) throw Error(out.error);
+          $('text').value = ($('text').value ? $('text').value + ' ' : '') + out.text; mode = 'voice';
+          $('micHint').textContent = 'Got it — edit the text below if anything is off.';
+        } catch (e) { showErr('Could not transcribe that — please type it instead.'); }
+        finally { $('mic').disabled = false; $('mic').textContent = '🎙️ Tap to talk'; }
+      };
+      rec.start(); $('mic').classList.add('on'); $('mic').textContent = '⏹ Tap when done';
+      timer = setTimeout(() => rec?.state === 'recording' && rec.stop(), 60000);
+    } else {
+      if (recog) { recog.stop(); return; }
+      recog = new SR(); recog.lang = 'en-US'; recog.interimResults = true; recog.continuous = true;
+      const start = $('text').value ? $('text').value + ' ' : '';
+      recog.onresult = e => { $('text').value = start + [...e.results].map(r => r[0].transcript).join(''); };
+      recog.onend = () => { recog = null; $('mic').classList.remove('on'); $('mic').textContent = '🎙️ Tap to talk'; };
+      recog.start(); mode = 'voice'; $('mic').classList.add('on'); $('mic').textContent = '⏹ Tap when done';
+    }
+  };
+}
 
 function showErr(m) { $('err').textContent = m; $('err').hidden = !m; }
 
@@ -68,43 +102,55 @@ $('form').onsubmit = async e => {
   if (!text && !image) return showErr('Add a photo or describe the problem.');
   $('send').disabled = true; $('send').textContent = 'Analyzing your issue…';
   try {
-    const r = await fetch('api/requests', {method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({text, image, tenant_name: $('name').value, input_mode: mode})});
+    const r = await fetch('api/report', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text, image, tenant_name: $('name').value, input_mode: mode, property_id: property?.id})});
     const data = await r.json(); if (!r.ok) throw Error(data.error || 'Something went wrong');
-    history.replaceState(null, '', '?id=' + data.id);
+    const q = new URLSearchParams(location.search); q.set('id', data.id); history.replaceState(null, '', '?' + q);
     $('form').hidden = true; renderStatus(data); poll(data.id);
   } catch (err) { showErr(err.message); }
   finally { $('send').disabled = false; $('send').textContent = 'Send to owner'; }
 };
 
-const STATUS = {awaiting_owner: 'Waiting for owner approval', dispatched: 'Fix approved', declined: 'Owner will follow up'};
+const STATUS = {awaiting_owner: 'Waiting for owner approval', dispatched: 'Fix approved', completed: 'Repair completed', declined: 'Owner will follow up'};
 function renderStatus(r) {
   const s = $('status'); s.hidden = false;
   const card = el('div', 'card');
-  const head = el('div'); head.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap';
-  head.append(el('span', 'pill s-' + r.status, STATUS[r.status] || r.status), el('span', 'pill u-' + r.plan.urgency, r.plan.urgency[0].toUpperCase() + r.plan.urgency.slice(1)));
-  card.append(head, el('h2', null, r.plan.issue_label));
-  card.firstChild.style.marginBottom = '8px';
-  card.append(el('p', 'small', r.triage.summary));
-  if (r.triage.tenant_safety_steps?.length) {
+  const head = el('div'); head.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px';
+  head.append(el('span', 'pill s-' + r.status, STATUS[r.status] || r.status), el('span', 'pill u-' + r.urgency, r.urgency[0].toUpperCase() + r.urgency.slice(1)));
+  card.append(head, el('h2', null, r.issue_label), el('p', 'small', r.summary));
+  if (r.safety_steps?.length && r.status !== 'completed') {
     card.append(el('h3', null, 'Do this now'));
-    const ul = el('ul', 'steps'); r.triage.tenant_safety_steps.forEach(t => ul.append(el('li', null, t))); card.append(ul);
+    const ul = el('ul', 'steps'); r.safety_steps.forEach(t => ul.append(el('li', null, t))); card.append(ul);
   }
-  if (r.status === 'awaiting_owner') card.append(el('p', 'muted', 'Your owner has been sent repair options. This page updates automatically.'));
-  if (r.work_order) { card.append(el('h3', null, 'Message from FixFlow')); card.append(el('div', 'msg', r.work_order.tenant_message));
-    if (r.work_order.part_link) { const a = el('a', null, 'See the part'); a.href = r.work_order.part_link; a.target = '_blank'; a.rel = 'noopener'; card.append(a); } }
-  if (r.status === 'declined') card.append(el('div', 'msg', 'Your owner reviewed this and will contact you directly.' + (r.decision?.note ? ' Note: ' + r.decision.note : '')));
+  if (r.status === 'awaiting_owner') card.append(el('p', 'muted', 'Your owner has been sent repair options. This page updates automatically — you can close it and come back.'));
+  if (r.tenant_message) { card.append(el('h3', null, 'Update from your owner')); card.append(el('div', 'msg', r.tenant_message));
+    if (r.part_link) { const a = el('a', null, 'See the part →'); a.href = r.part_link; a.target = '_blank'; a.rel = 'noopener'; card.append(a); } }
+  if (r.status === 'declined') card.append(el('div', 'msg', 'Your owner reviewed this and will contact you directly.' + (r.declined_note ? ' Note: ' + r.declined_note : '')));
+  if (['dispatched', 'completed'].includes(r.status)) {
+    if (r.tenant_confirmation) card.append(el('div', 'msg', r.tenant_confirmation.fixed ? '✓ Thanks for confirming it\'s fixed.' : 'Thanks — your owner has been told it\'s still not fixed.'));
+    else {
+      card.append(el('h3', null, 'Once the repair is done — is it fixed?'));
+      const row = el('div', 'row'); const yes = el('button', 'btn', '👍 Yes, fixed'), no = el('button', 'btn ghost', '👎 Still broken');
+      yes.onclick = () => confirmFix(r.id, true); no.onclick = () => confirmFix(r.id, false);
+      row.append(yes, no); card.append(row);
+    }
+  }
   const again = el('button', 'btn ghost', 'Report another issue'); again.style.marginTop = '12px';
-  again.onclick = () => { location.href = location.pathname; };
+  again.onclick = () => { const q = new URLSearchParams(location.search); q.delete('id'); location.search = q.toString(); };
   card.append(again);
   s.replaceChildren(card);
 }
+async function confirmFix(id, fixed) {
+  const note = fixed ? '' : (prompt('What\'s still wrong? (optional)') || '');
+  const r = await fetch('api/confirm', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id, fixed, note})});
+  if (r.ok) renderStatus(await r.json());
+}
 let timer;
 function poll(id) { clearInterval(timer); timer = setInterval(async () => {
-  const r = await fetch('api/request?id=' + encodeURIComponent(id)).then(x => x.ok ? x.json() : null).catch(() => null);
-  if (r) { renderStatus(r); if (r.status !== 'awaiting_owner') clearInterval(timer); } }, 3000); }
-const existing = new URLSearchParams(location.search).get('id');
-if (existing) fetch('api/request?id=' + encodeURIComponent(existing)).then(r => r.ok ? r.json() : null).then(r => { if (r) { $('form').hidden = true; renderStatus(r); if (r.status === 'awaiting_owner') poll(r.id); } });
+  const r = await fetch('api/status?id=' + encodeURIComponent(id)).then(x => x.ok ? x.json() : null).catch(() => null);
+  if (r) { renderStatus(r); if (['completed', 'declined'].includes(r.status) || r.tenant_confirmation) clearInterval(timer); } }, 3000); }
+if (params.get('id')) fetch('api/status?id=' + encodeURIComponent(params.get('id'))).then(r => r.ok ? r.json() : null).then(r => {
+  if (r) { $('form').hidden = true; renderStatus(r); if (!['completed', 'declined'].includes(r.status)) poll(r.id); } });
 </script>
 </body>
 </html>

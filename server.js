@@ -7,9 +7,10 @@ const TYPES = {html: 'text/html; charset=utf-8', js: 'text/javascript', css: 'te
 http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   if (url.pathname.startsWith('/api/')) {
-    let raw = ''; for await (const c of req) { raw += c; if (raw.length > 4_500_000) { res.writeHead(413); return res.end(); } }
+    let raw = ''; for await (const c of req) { raw += c; if (raw.length > 6_000_000) { res.writeHead(413); return res.end(); } }
     let body = {}; try { body = raw ? JSON.parse(raw) : {}; } catch { res.writeHead(400); return res.end('{"error":"Invalid JSON"}'); }
-    const [status, data] = await handle(url.pathname.slice(5), req.method, {body, query: Object.fromEntries(url.searchParams)});
+    const [status, data] = await handle(url.pathname.slice(5), req.method, {body, query: Object.fromEntries(url.searchParams), headers: req.headers});
+    if (data?.__binary) { res.writeHead(status, {'Content-Type': data.type}); return res.end(data.__binary); }
     res.writeHead(status, {'Content-Type': 'application/json', 'Cache-Control': 'no-store'}); return res.end(JSON.stringify(data));
   }
   const file = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
